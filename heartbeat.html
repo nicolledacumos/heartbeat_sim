@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heartbeat Player</title>
+<style>
+  :root {
+    --bg: #fff5f6;
+    --fg: #3a1218;
+    --muted: #8a5a62;
+    --accent: #d6213c;
+    --card: #ffffff;
+    --border: #f0cfd4;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a0c0f;
+      --fg: #f6dfe2;
+      --muted: #b98d95;
+      --accent: #ff4d66;
+      --card: #26121a;
+      --border: #4a2530;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .card {
+    width: min(420px, 92vw);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    text-align: center;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; font-weight: 600; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: 0.9rem; }
+  #heart {
+    font-size: 84px;
+    line-height: 1;
+    color: var(--accent);
+    transition: transform 0.08s ease-out;
+    user-select: none;
+  }
+  #heart.beat { transform: scale(1.25); }
+  .bpm { font-size: 2.2rem; font-weight: 600; margin-top: 8px; }
+  .bpm small { font-size: 0.9rem; color: var(--muted); font-weight: 400; }
+  .stats { color: var(--muted); font-size: 0.85rem; margin: 4px 0 20px; }
+  button {
+    font: inherit;
+    padding: 10px 18px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    cursor: pointer;
+    margin: 4px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .row { margin-top: 18px; color: var(--muted); font-size: 0.85rem; }
+  input[type=range] { width: 160px; vertical-align: middle; accent-color: var(--accent); }
+  #status { margin-top: 14px; font-size: 0.85rem; color: var(--muted); min-height: 1.2em; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Heartbeat Player</h1>
+  <p class="sub">Plays the sound for your ESP32 heart</p>
+
+  <div id="heart">&#10084;</div>
+  <div class="bpm"><span id="bpm">--</span> <small>BPM</small></div>
+  <div class="stats">raw touch: <span id="raw">--</span> &nbsp;|&nbsp; proximity: <span id="prox">--</span></div>
+
+  <button class="primary" id="connect">Connect ESP32</button>
+  <button id="test">Test sound</button>
+
+  <div class="row">
+    Volume
+    <input type="range" id="vol" min="0" max="1" step="0.01" value="0.8">
+  </div>
+  <div id="status">Not connected</div>
+</div>
+
+<script>
+let ctx = null;
+let port = null;
+let reader = null;
+const $ = (id) => document.getElementById(id);
+
+function ensureAudio() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume();
+}
+
+// A soft thump: a short sine burst that glides down in pitch, plus a 2nd
+// harmonic so it is still audible on small laptop speakers.
+function thump(freq, amp, dur) {
+  ensureAudio();
+  const t = ctx.currentTime;
+  const master = parseFloat($("vol").value);
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.linearRampToValueAtTime(Math.max(amp * master, 0.0001), t + 0.005);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  gain.connect(ctx.destination);
+
+  [[1, 1.0], [2, 0.45]].forEach(([mult, level]) => {
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    g.gain.value = level;
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freq * mult * 1.5, t);
+    osc.frequency.exponentialRampToValueAtTime(freq * mult, t + 0.05);
+    osc.connect(g).connect(gain);
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
+  });
+}
+
+function lub(vol) { thump(90, 0.9 * vol, 0.18); pulseHeart(); }
+function dub(vol) { thump(110, 0.6 * vol, 0.14); }
+
+function pulseHeart() {
+  const h = $("heart");
+  h.classList.add("beat");
+  setTimeout(() => h.classList.remove("beat"), 90);
+}
+
+function handleLine(line) {
+  const p = line.trim().split(",");
+  if (p[0] === "L") lub(parseFloat(p[1]) || 0.5);
+  else if (p[0] === "D") dub(parseFloat(p[1]) || 0.5);
+  else if (p[0] === "S") {
+    $("raw").textContent = p[1];
+    $("prox").textContent = parseFloat(p[2]).toFixed(2);
+    $("bpm").textContent = p[3];
+  }
+}
+
+async function connect() {
+  if (!("serial" in navigator)) {
+    $("status").textContent = "Web Serial isn't supported here. Use Chrome or Edge on a laptop.";
+    return;
+  }
+  ensureAudio();
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+  } catch (e) {
+    $("status").textContent = "Couldn't open the port (is the Arduino Serial Monitor still open?)";
+    return;
+  }
+  $("status").textContent = "Connected. Listening for heartbeats...";
+  $("connect").textContent = "Disconnect";
+
+  const decoder = new TextDecoderStream();
+  port.readable.pipeTo(decoder.writable).catch(() => {});
+  reader = decoder.readable.getReader();
+
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      let idx;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        handleLine(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+      }
+    }
+  } catch (e) {
+    /* port unplugged or closed */
+  }
+  disconnectCleanup();
+}
+
+async function disconnect() {
+  try { if (reader) await reader.cancel(); } catch (e) {}
+  try { if (port) await port.close(); } catch (e) {}
+  disconnectCleanup();
+}
+
+function disconnectCleanup() {
+  reader = null;
+  port = null;
+  $("connect").textContent = "Connect ESP32";
+  $("status").textContent = "Not connected";
+}
+
+$("connect").addEventListener("click", () => (port ? disconnect() : connect()));
+$("test").addEventListener("click", () => {
+  lub(0.8);
+  setTimeout(() => dub(0.8), 170);
+});
+</script>
+</body>
+</html>
