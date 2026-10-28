@@ -1,0 +1,101 @@
+const int TOUCH_PIN = 32;
+const int LED_PINS[] = {25, 5, 19};
+const int NUM_LEDS = sizeof(LED_PINS) / sizeof(LED_PINS[0]);
+
+#define FAR_VALUE    730  
+#define CLOSE_VALUE  500  
+
+const float RESPONSE = 0.7; 
+
+const unsigned long SAMPLE_MS = 10;
+
+const float ATTACK  = 0.15; 
+const float RELEASE = 0.03; 
+
+const float REST_BPM    = 55.0;
+const float MAX_BPM     = 140.0;
+const float REST_BRIGHT = 0.35;  
+const float MAX_BRIGHT  = 1.00; 
+const float BASE_GLOW   = 0.03; 
+const float STAGGER_MS  = 0; 
+
+float proximity = 0;         
+unsigned long lastSampleAt = 0;
+unsigned long beatStart = 0;
+float currentBpm = REST_BPM;
+
+void setup() {
+  Serial.begin(115200);
+  for (int i = 0; i < NUM_LEDS; i++) {
+    pinMode(LED_PINS[i], OUTPUT);
+    analogWrite(LED_PINS[i], 0);
+  }
+  beatStart = millis();
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastSampleAt >= SAMPLE_MS) {
+    lastSampleAt = now;
+
+    long sum = 0;
+    for (int i = 0; i < 4; i++) sum += touchRead(TOUCH_PIN);
+    int value = sum / 4;
+
+    updateProximity(value);
+
+    Serial.print(value);
+    Serial.print(",");
+    Serial.print(proximity * 100);
+    Serial.print(",");
+    Serial.println(currentBpm);
+  }
+
+  updateLeds(now);
+}
+
+void updateProximity(int value) {
+  float target = (float)(FAR_VALUE - value) / (FAR_VALUE - CLOSE_VALUE);
+  target = constrain(target, 0.0, 1.0);
+  target = powf(target, RESPONSE);
+
+  float rate = (target > proximity) ? ATTACK : RELEASE;
+  proximity += rate * (target - proximity);
+}
+
+float bump(float t, float center, float width) {
+  float x = (t - center) / width;
+  return expf(-x * x);
+}
+
+float heartbeatLevel(float t, float beatMs) {
+  float scale = constrain(beatMs / 1000.0, 0.5, 1.2);
+  float lub = 1.00 * bump(t, 60  * scale, 35 * scale);
+  float dub = 0.65 * bump(t, 230 * scale, 45 * scale);
+  return max(lub, dub);
+}
+
+void updateLeds(unsigned long now) {
+  currentBpm = REST_BPM + proximity * (MAX_BPM - REST_BPM);
+  float peakBright = REST_BRIGHT + proximity * (MAX_BRIGHT - REST_BRIGHT);
+  float beatMs = 60000.0 / currentBpm;
+
+  float t = (float)(now - beatStart);
+  if (t >= beatMs) {
+    beatStart = now;
+    t = 0;
+  }
+
+  for (int i = 0; i < NUM_LEDS; i++) {
+    float ti = t - i * STAGGER_MS;
+    if (ti < 0) ti += beatMs;
+
+    float level = heartbeatLevel(ti, beatMs);
+    float b = BASE_GLOW + (peakBright - BASE_GLOW) * level;
+    b = constrain(b, 0.0, 1.0);
+    b = powf(b, 2.0);  
+
+    analogWrite(LED_PINS[i], (int)(b * 255));
+  }
+}
