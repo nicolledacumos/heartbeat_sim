@@ -8,6 +8,7 @@ const int NUM_LEDS = sizeof(LED_PINS) / sizeof(LED_PINS[0]);
 const float RESPONSE = 0.7; 
 
 const unsigned long SAMPLE_MS = 10;
+const unsigned long STATUS_MS = 100;  
 
 const float ATTACK  = 0.15; 
 const float RELEASE = 0.03; 
@@ -19,10 +20,17 @@ const float MAX_BRIGHT  = 1.00;
 const float BASE_GLOW   = 0.03; 
 const float STAGGER_MS  = 0; 
 
+const float REST_VOLUME = 0.35;  
+const float MAX_VOLUME  = 1.00;   
+
 float proximity = 0;         
+int lastValue = 0;                 
 unsigned long lastSampleAt = 0;
+unsigned long lastStatusAt = 0;   
 unsigned long beatStart = 0;
 float currentBpm = REST_BPM;
+bool lubFired = false;            
+bool dubFired = false;             
 
 void setup() {
   Serial.begin(115200);
@@ -42,17 +50,17 @@ void loop() {
     long sum = 0;
     for (int i = 0; i < 4; i++) sum += touchRead(TOUCH_PIN);
     int value = sum / 4;
+    lastValue = value;
 
     updateProximity(value);
-
-    Serial.print(value);
-    Serial.print(",");
-    Serial.print(proximity * 100);
-    Serial.print(",");
-    Serial.println(currentBpm);
   }
 
   updateLeds(now);
+
+  if (now - lastStatusAt >= STATUS_MS) {
+    lastStatusAt = now;
+    Serial.printf("S,%d,%.2f,%.0f\n", lastValue, proximity, currentBpm);
+  }
 }
 
 void updateProximity(int value) {
@@ -80,11 +88,24 @@ void updateLeds(unsigned long now) {
   currentBpm = REST_BPM + proximity * (MAX_BPM - REST_BPM);
   float peakBright = REST_BRIGHT + proximity * (MAX_BRIGHT - REST_BRIGHT);
   float beatMs = 60000.0 / currentBpm;
+  float scale = constrain(beatMs / 1000.0, 0.5, 1.2);                       
+  float volume = REST_VOLUME + proximity * (MAX_VOLUME - REST_VOLUME);     
 
   float t = (float)(now - beatStart);
   if (t >= beatMs) {
     beatStart = now;
     t = 0;
+    lubFired = false; 
+    dubFired = false;
+  }
+
+  if (!lubFired && t >= 60 * scale) {
+    lubFired = true;
+    Serial.printf("L,%.2f\n", volume);
+  }
+  if (!dubFired && t >= 230 * scale) {
+    dubFired = true;
+    Serial.printf("D,%.2f\n", volume);
   }
 
   for (int i = 0; i < NUM_LEDS; i++) {
